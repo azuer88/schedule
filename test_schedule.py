@@ -22,6 +22,7 @@ class mock_datetime(object):
     """
     Monkey-patch datetime for predictable results
     """
+
     def __init__(self, year, month, day, hour, minute, second=0):
         self.year = year
         self.month = month
@@ -40,6 +41,13 @@ class mock_datetime(object):
             def now(cls):
                 return cls(self.year, self.month, self.day,
                            self.hour, self.minute, self.second)
+
+            @classmethod
+            def utcnow(cls):
+                return cls(self.year, self.month, self.day,
+                           self.hour, self.minute, self.second)
+
+        self.original_datetime = datetime.datetime
         self.original_datetime = datetime.datetime
         datetime.datetime = MockDate
 
@@ -254,6 +262,30 @@ class SchedulerTests(unittest.TestCase):
             assert every().saturday.do(mock_job).next_run.day == 9
             assert every().sunday.do(mock_job).next_run.day == 10
 
+    def test_timezone(self):
+        with mock_datetime(2010, 1, 6, 12, 20):
+            mock_job = make_mock_job()
+            schedule.use_local_tz("asia/manila")
+            assert every().day.at('10:30').timezone("asia/manila") \
+                .do(mock_job).next_run.hour == 10
+            # minute should not change
+            assert every().minute.at(':40').do(mock_job).next_run.hour == 12
+            assert every().minute.at(':40').do(mock_job).next_run.minute == 20
+            assert every().minute.at(':40').do(mock_job).next_run.second == 40
+            assert every().minute.at(':10').do(mock_job).next_run.hour == 12
+            assert every().minute.at(':10').do(mock_job).next_run.minute == 20
+            assert every().minute.at(':10').do(mock_job).next_run.second == 10
+            schedule.use_utc_tz()
+            assert every().day.at('10:30').timezone("asia/manila") \
+                .do(mock_job).next_run.hour == 2
+            # minute should not change
+            assert every().minute.at(':40').do(mock_job).next_run.hour == 12
+            assert every().minute.at(':40').do(mock_job).next_run.minute == 20
+            assert every().minute.at(':40').do(mock_job).next_run.second == 40
+            assert every().minute.at(':10').do(mock_job).next_run.hour == 12
+            assert every().minute.at(':10').do(mock_job).next_run.minute == 20
+            assert every().minute.at(':10').do(mock_job).next_run.second == 10
+
     def test_run_all(self):
         mock_job = make_mock_job()
         every().minute.do(mock_job)
@@ -271,6 +303,7 @@ class SchedulerTests(unittest.TestCase):
     def test_to_string(self):
         def job_fun():
             pass
+
         s = str(every().minute.do(job_fun, 'foo', bar=23))
         assert s == ("Job(interval=1, unit=minutes, do=job_fun, "
                      "args=('foo',), kwargs={'bar': 23})")
@@ -281,6 +314,7 @@ class SchedulerTests(unittest.TestCase):
     def test_to_repr(self):
         def job_fun():
             pass
+
         s = repr(every().minute.do(job_fun, 'foo', bar=23))
         assert s.startswith("Every 1 minute do job_fun('foo', bar=23) "
                             "(last run: [never], next run: ")
@@ -300,6 +334,7 @@ class SchedulerTests(unittest.TestCase):
     def test_to_string_functools_partial_job_func(self):
         def job_fun(arg):
             pass
+
         job_fun = functools.partial(job_fun, 'foo')
         job_repr = repr(every().minute.do(job_fun, bar=True, somekey=23))
         assert 'functools.partial' in job_repr
@@ -414,6 +449,7 @@ class SchedulerTests(unittest.TestCase):
     def test_cancel_job(self):
         def stop_job():
             return schedule.CancelJob
+
         mock_job = make_mock_job()
 
         every().second.do(stop_job)

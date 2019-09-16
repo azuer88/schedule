@@ -47,8 +47,16 @@ import logging
 import random
 import re
 import time
+import sys
+import pytz
 
 logger = logging.getLogger('schedule')
+
+PY3 = sys.version_info[0] == 3
+if PY3:
+    string_types = str,
+else:
+    string_types = basestring,  # noqa
 
 
 class ScheduleError(Exception):
@@ -66,6 +74,21 @@ class IntervalError(ScheduleValueError):
     pass
 
 
+class TimezoneError(ScheduleError):
+    """Timezone related error"""
+    pass
+
+
+class MissingTimezone(TimezoneError):
+    """Timezone is missing"""
+    pass
+
+
+class InvalidTimezone(TimezoneError):
+    """Timezone is not valid"""
+    pass
+
+
 class CancelJob(object):
     """
     Can be returned from a job to unschedule itself.
@@ -79,8 +102,10 @@ class Scheduler(object):
     factories to create jobs, keep record of scheduled jobs and
     handle their execution.
     """
+
     def __init__(self):
         self.jobs = []
+        self.default_tz = pytz.UTC
 
     def run_pending(self):
         """
@@ -144,6 +169,7 @@ class Scheduler(object):
         :return: An unconfigured :class:`Job <Job>`
         """
         job = Job(interval, self)
+        job.default_tz = self.default_tz
         return job
 
     def _run_job(self, job):
@@ -168,7 +194,13 @@ class Scheduler(object):
         :return: Number of seconds until
                  :meth:`next_run <Scheduler.next_run>`.
         """
-        return (self.next_run - datetime.datetime.now()).total_seconds()
+        return (self.next_run - datetime.datetime.utcnow()).total_seconds()
+
+    def use_local_tz(self, tz):
+        self.default_tz = tz
+
+    def use_utc_tz(self):
+        self.default_tz = pytz.UTC
 
 
 class Job(object):
@@ -188,6 +220,7 @@ class Job(object):
     A job is usually created and returned by :meth:`Scheduler.every`
     method, which also defines its `interval`.
     """
+
     def __init__(self, interval, scheduler=None):
         self.interval = interval  # pause interval * unit between runs
         self.latest = None  # upper limit to the interval
@@ -200,6 +233,7 @@ class Job(object):
         self.start_day = None  # Specific day of the week to start on
         self.tags = set()  # unique set of tags for the job
         self.scheduler = scheduler  # scheduler to register with
+        self.default_tz = pytz.UTC  # default using UTC
 
     def __lt__(self, other):
         """
@@ -223,13 +257,14 @@ class Job(object):
 
     def __repr__(self):
         def format_time(t):
+            t = self._to_local(t)
             return t.strftime('%Y-%m-%d %H:%M:%S') if t else '[never]'
 
         def is_repr(j):
             return not isinstance(j, Job)
 
         timestats = '(last run: %s, next run: %s)' % (
-                    format_time(self.last_run), format_time(self.next_run))
+            format_time(self.last_run), format_time(self.next_run))
 
         if hasattr(self.job_func, '__name__'):
             job_func_name = self.job_func.__name__
@@ -242,14 +277,14 @@ class Job(object):
 
         if self.at_time is not None:
             return 'Every %s %s at %s do %s %s' % (
-                   self.interval,
-                   self.unit[:-1] if self.interval == 1 else self.unit,
-                   self.at_time, call_repr, timestats)
+                self.interval,
+                self.unit[:-1] if self.interval == 1 else self.unit,
+                self.at_time, call_repr, timestats)
         else:
             fmt = (
-                'Every %(interval)s ' +
-                ('to %(latest)s ' if self.latest is not None else '') +
-                '%(unit)s do %(call_repr)s %(timestats)s'
+                    'Every %(interval)s ' +
+                    ('to %(latest)s ' if self.latest is not None else '') +
+                    '%(unit)s do %(call_repr)s %(timestats)s'
             )
 
             return fmt % dict(
@@ -378,7 +413,7 @@ class Job(object):
         self.tags.update(tags)
         return self
 
-    def at(self, time_str):
+    def at(self, time_str, tz=None):
         """
         Specify a particular time that the job should be run at.
 
@@ -430,6 +465,93 @@ class Job(object):
         self.at_time = datetime.time(hour, minute, second)
         return self
 
+    def _to_utc(self, time_value):
+        """
+        Convert 'time_value' to UTC
+
+        Assume that 'time_value' is in local timezone
+        (self.default_tz), convert it to UTC time.
+
+        :param time_value: time to convert to UTC
+        :return: time_value in UTC
+        """
+        if time_value is None:
+            return None
+
+        src_tz = self.default_tz
+        dst_tz = pytz.UTC
+        if src_tz.zone == dst_tz.zone:
+            return time_value
+        else:
+            if isinstance(time_value, datetime.time):
+                return dst_tz.localize(
+                    datetime.datetime.combine(
+                        datetime.datetime.today(),
+                        time_value
+                    )
+                ).astimezone(src_tz).time()
+            else:
+                return dst_tz.localize(
+                    time_value
+                ).astimezone(src_tz)
+
+    def _to_local(self, time_value):
+        """
+        Convert 'time_value' to local timezone
+
+        Assume that 'time_value' is in UTC, convert it to
+        the local timezone (self.default_tz)
+
+        :param time_value: time to convert to local timezone
+        :return: time_value in local timezone
+        """
+        if time_value is None:
+            return None
+        src_tz = pytz.UTC
+        dst_tz = self.default_tz
+        if src_tz.zone == dst_tz.zone:
+            return time_value
+        else:
+            if isinstance(time_value, datetime.time):
+                return dst_tz.localize(
+                    datetime.datetime.combine(
+                        datetime.datetime.today(),
+                        time_value
+                    )
+                ).astimezone(src_tz).time()
+            else:
+                return dst_tz.localize(
+                    time_value
+                ).astimezone(src_tz)
+
+    def timezone(self, tz):
+        """
+        Adjust the time set by at() to utc, using 'tz'.
+
+        The time set by 'at' function is assumed to be in UTC.  Calling
+        this function, will adjust it to UTC, using 'tz' as the source
+        timezone for the time set by previous 'at' function call.
+
+        :param tz: timezone to use when adjusting to UTC
+        :return: The invoked job instance
+        """
+
+        if self.unit in ("hours", "minutes", "seconds"):
+            # not adjusting if running every hour, minute, or second
+            return self
+
+        tz = _get_timezone(tz)
+
+        if tz.zone != self.default_tz.zone:
+            self.at_time = tz.localize(
+                datetime.datetime.combine(
+                    datetime.datetime.today(),
+                    self.at_time
+                )
+            ).astimezone(pytz.UTC).time()
+
+        return self
+
     def to(self, latest):
         """
         Schedule the job to run at an irregular (randomized) interval.
@@ -473,7 +595,7 @@ class Job(object):
         """
         :return: ``True`` if the job should be run now.
         """
-        return datetime.datetime.now() >= self.next_run
+        return datetime.datetime.utcnow() >= self.next_run
 
     def run(self):
         """
@@ -483,7 +605,7 @@ class Job(object):
         """
         logger.info('Running job %s', self)
         ret = self.job_func()
-        self.last_run = datetime.datetime.now()
+        self.last_run = datetime.datetime.utcnow()
         self._schedule_next_run()
         return ret
 
@@ -502,7 +624,7 @@ class Job(object):
             interval = self.interval
 
         self.period = datetime.timedelta(**{self.unit: interval})
-        self.next_run = datetime.datetime.now() + self.period
+        self.next_run = datetime.datetime.utcnow() + self.period
         if self.start_day is not None:
             if self.unit != 'weeks':
                 raise ScheduleValueError('`unit` should be \'weeks\'')
@@ -539,7 +661,7 @@ class Job(object):
             # If we are running for the first time, make sure we run
             # at the specified time *today* (or *this hour*) as well
             if not self.last_run:
-                now = datetime.datetime.now()
+                now = datetime.datetime.utcnow()
                 if (self.unit == 'days' and self.at_time > now.time() and
                         self.interval == 1):
                     self.next_run = self.next_run - datetime.timedelta(days=1)
@@ -554,7 +676,7 @@ class Job(object):
                                     datetime.timedelta(minutes=1)
         if self.start_day is not None and self.at_time is not None:
             # Let's see if we will still make that time we specified today
-            if (self.next_run - datetime.datetime.now()).days >= 7:
+            if (self.next_run - datetime.datetime.utcnow()).days >= 7:
                 self.next_run -= self.period
 
 
@@ -615,3 +737,27 @@ def idle_seconds():
     :data:`default scheduler instance <default_scheduler>`.
     """
     return default_scheduler.idle_seconds
+
+
+def _get_timezone(zone):
+    if zone is None:
+        raise InvalidTimezone("None is not a valid timezone")
+    if isinstance(zone, string_types):
+        try:
+            return pytz.timezone(zone)
+        except pytz.exceptions.UnknownTimeZoneError as e:
+            raise InvalidTimezone(str(e))
+    elif isinstance(zone, pytz.tzinfo.BaseTzInfo):
+        return zone
+    else:
+        raise InvalidTimezone(
+            "{} is not a valid timezone".format(str(zone))
+        )
+
+
+def use_local_tz(zone):
+    default_scheduler.use_local_tz(_get_timezone(zone))
+
+
+def use_utc_tz():
+    default_scheduler.use_utc_tz()
